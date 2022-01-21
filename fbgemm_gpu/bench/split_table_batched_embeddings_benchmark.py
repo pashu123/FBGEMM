@@ -278,14 +278,21 @@ def benchmark_requests_refer(
     weighted: bool,
     flush_gpu_cache_size_mb: int = 0,
     check_median: bool = False,
-) -> float:
+    pre_trained_weight = None, # This needs to be passed to check correctness.
+    ):
     do_pooling = pooling_mode in ["sum", "mean"]
     if do_pooling:
-        nn_embedding_list = [
-            torch.nn.EmbeddingBag(E, D, mode=pooling_mode, sparse=True).cuda()
-        ] * T
+        # We need to create deep copy of embedding bag class to check correctness.
+        nn_embedding_list = [] 
+        for i in range(T):
+            A = torch.nn.EmbeddingBag(E, D, mode=pooling_mode,sparse=True).cuda()
+            nn_embedding_list.append(A)
     else:
         nn_embedding_list = [torch.nn.Embedding(E, D, sparse=True).cuda()] * T
+
+    # Assign random weights from gpu impl.
+    for i,j in enumerate(pre_trained_weight):
+        nn_embedding_list[i].weight = torch.nn.Parameter(j)
 
     times = []
     if torch.cuda.is_available():
@@ -293,11 +300,11 @@ def benchmark_requests_refer(
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
     for (indices, _, weights) in requests:
-        indices_list = indices.view(T, B, L).split(1)
+        indices_list = indices.view(T, B, L)
 
         if weighted:
             assert weights is not None
-            weights_list = weights.view(T, B, L).split(1)
+            weights_list = weights.view(T, B, L)
 
         start_time = time.time()
         if torch.cuda.is_available():
@@ -338,17 +345,7 @@ def benchmark_requests_refer(
         else:
             final_output = torch.cat(nn_embedding_output, dim=0).view(-1, D)
 
-        if torch.cuda.is_available():
-            end_event.record()
-            torch.cuda.synchronize()
-            it_time = start_event.elapsed_time(end_event) * 1.0e-3
-            times.append(it_time)
-        else:
-            it_time = time.time() - start_time
-            times.append(it_time)
-    avg_time = sum(times) / len(requests)
-    median_time = statistics.median(times)
-    return median_time if check_median else avg_time
+    return final_output
 
 
 def benchmark_pipelined_requests(
